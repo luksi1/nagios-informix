@@ -20,17 +20,12 @@ Dependencies
 
 Examples
 ======
-```Chunks
-check_ids_chunks --warning 90 --critical 95 --mode=chunks
-```
-```Transaction Logs
+```Examples
+check_ids_chunks --warning 90 --critical 95
 check_ids_logs --warning 25 --critical 50
-```
-```Status
 check_ids_status -w 1 -c 1
-```
-```Sessions blocked and waiting for database object
 check_ids_waits -w 10 -c 20
+```
 
 Notes
 ======

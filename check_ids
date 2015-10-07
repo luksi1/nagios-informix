@@ -1,0 +1,206 @@
+#!/opt/perl/bin/perl
+# Author: Luke Simmons (VGR IT)
+# Version 2.0
+# Change log:
+# 2015-10-06 Moved to embedded class file
+# 2012-10-12 First commit
+# Notes:
+# Test on Solaris 10
+
+use Getopt::Long;
+use lib qw(/opt/plugins);
+use utils qw($TIMEOUT %ERRORS);
+use Switch;
+use strict;
+
+my $warning;
+my $critical;
+my $mode;
+my $help;
+my $usage;
+my $TIMEOUT;
+my $result;
+my $monitor_name;
+
+$TIMEOUT = 30;
+my $INFORMIXDIR = '';
+my $INFORMIXSERVER="";
+
+my $username = "";
+my $password = "";
+
+$ENV{'INFORMIXSERVER'}=$INFORMIXSERVER;
+
+# Options
+GetOptions(
+	"critical:i" => \$critical,
+	"warning:i" => \$warning,
+	"mode:s" => \$mode,
+	"help" => \$help,
+	"usage" => \$usage
+);
+
+help() if defined($help) || defined($usage);
+help() if ! defined($mode);
+
+{
+package Informix;
+require DBI;
+use Data::Dumper;
+
+sub new
+{
+	my ($class, $db, $server) = @_;
+	my $self = {
+		db => $db,
+		server => $server,
+		source => $server,
+	};
+	bless $self, $class;
+	return $self;
+}
+
+sub connect
+{
+	my ($self, $username, $password, $override) = @_;
+	if (defined $self->{dbh} && $override == 0) {
+		$self->{dbh};
+	} else {
+		$self->{dbh} = DBI->connect("dbi:Informix:$self->{db}", $self->{user}, $self->{password}, {RaiseError => 0, PrintError => 1, AutoCommit => 1}) or die "Could not connect to server: $?\n";}
+}
+
+sub fetchResult
+{
+	my $result;
+
+	my ($self, $sql) = @_;
+	print "You must indicate an SQL statement\n" if !defined($sql);
+	exit 1 if !defined($sql);
+	my $sth = $self->{dbh}->prepare($sql);
+	$sth->execute();
+	my @result;
+	while(my (@row) = $sth->fetchrow_array) {
+		return $row[0];
+	}
+}
+
+sub fetchResultsAsHash
+{
+	my %results;
+
+	my ($self, $sql) = @_;
+	print "You must indicate an SQL statement\n" if !defined($sql);
+	exit 1 if !defined($sql);
+	my $sth = $self->{dbh}->prepare($sql);
+	$sth->execute();
+	my $results  = $sth->fetchall_arrayref({});
+	return $results;
+}
+
+sub checkStatus
+{
+	my ($self) = @_;
+	my $sql = 'SELECT sh_mode from sysshmvals';
+	my $result = $self->fetchResult($sql);
+	return 1 if $result = 5;
+	return 0;
+}
+
+sub checkLogs
+{
+	my ($self) = @_;
+
+	my $sql = "SELECT count(*) from syslogs where is_backed_up = 0 and is_new != 1";
+	my $result = $self->fetchResult($sql);
+	return "logs_not_backed_up=" . $result;
+}
+
+sub checkChunks
+{
+	my ($self) = @_;
+	my @result;
+	
+	my $sql = "SELECT name[1,8] dbspace, round((sum(nfree)) / (sum(chksize)) * 100, 2) percent_free FROM sysdbspaces d, syschunks c WHERE d.dbsnum = c.dbsnum group by 1 order by 1";
+	my $rows = $self->fetchResultsAsHash($sql);
+	foreach my $row (@{$rows}) {
+		$row->{dbspace} =~ s/^\s+//g;
+		$row->{dbspace} =~ s/\s+$//g;
+		$row->{percent_free} =~ s/^\s+//g;
+		$row->{percent_free} =~ s/\s+$//g;
+		push @result, $row->{dbspace} . "=" . $row->{percent_free};
+	}
+	return join(";", @result);
+}
+
+sub checkWaits
+{
+	my ($self) = @_;
+	my $sql = "SELECT count(*) from sysseswts";
+	my $result = $self->fetchResult($sql);
+	return "waits=" . $result;
+}
+
+}
+
+sub help {
+	print "Usage:\n";
+	print "=======\n";
+	print "Modes:\n";
+	print "\tstatus\n";
+	print "\tlogs\n";
+	print "\tchunks\n";
+	print "\twaits\n";
+	print "\n";
+	print "Examples:\n";
+	print "========\n";
+	print "\tcheck_informix -mode status\n";
+	print "\tcheck_informix -mode logs -critical 20 -warning 10\n";
+	print "\tcheck_informix -mode chunks -critical 95 -warning 90\n";
+	print "\tcheck_informix -mode waits -critical 10 -warning 5\n";
+	exit 0;
+}
+
+# Initiate object
+my $ids = new Informix("sysmaster",$INFORMIXSERVER,$username,$password);
+$ids->connect($username,$password);
+
+switch ($mode) {
+	case "status" { $monitor_name = "status"; $result = $ids->checkStatus();}
+	case "logs" { $monitor_name = "logs"; $result = $ids->checkLogs();}
+	case "waits" { $monitor_name = "waits"; $result = $ids->checkWaits();}
+	case "chunks" { $monitor_name = "chunks"; $result = $ids->checkChunks();}
+}
+
+# Timeout handler used
+$SIG{'ALRM'} = sub {
+        print "Plugin timed out after $TIMEOUT seconds - CRITICAL\n";
+        exit($ERRORS{'CRITICAL'});
+};
+
+# Install timeout handler, so that the plugin does not hang indefinitely.
+alarm($TIMEOUT);
+
+if ( defined $critical ) {
+
+        if ($result eq "") {
+		print "\u$monitor_name - CRITICAL - one or more processes have died unex
+pectedly\n";
+		exit($ERRORS{'CRITICAL'});
+        } elsif ($result >= $critical) {
+                print "\u$monitor_name - CRITICAL | $result\n";
+                exit($ERRORS{'CRITICAL'});
+        } elsif ($result >= $warning) {
+                print "\u$monitor_name - WARNING | $result\n";
+                exit($ERRORS{'WARNING'});
+        } else {
+		print "\u$monitor_name - OK | $result\n";
+		exit 0;
+	}
+} 
+
+if (! $result) {
+	print "\u$monitor_name - FAILED";
+	exit($ERRORS{'CRITICAL'});
+}
+
+print "\u$monitor_name - OK\n";

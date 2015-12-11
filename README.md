@@ -37,7 +37,7 @@ Bugs
 
 Author
 ======
-Luke Simmons (VGR IT)
+Luke Simmons
 
 Version
 ======
